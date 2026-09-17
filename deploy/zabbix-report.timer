@@ -1,0 +1,12 @@
+[Unit]
+Description=Agendamento diário da coleta de disponibilidade do Zabbix
+
+[Timer]
+# Executa todos os dias às 06:00 no fuso horário configurado no servidor.
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=zabbix-report.service
+
+[Install]
+WantedBy=timers.target
