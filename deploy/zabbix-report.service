@@ -1,0 +1,25 @@
+[Unit]
+Description=Coleta diária de disponibilidade do Zabbix
+Wants=network-online.target
+After=network-online.target
+# Evita ciclos ilimitados caso o Zabbix permaneça indisponível.
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=zabbix-report
+Group=zabbix-report
+WorkingDirectory=/opt/zabbix-report
+EnvironmentFile=-/etc/zabbix-report/zabbix-report.env
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/zabbix-report/.browsers
+ExecStart=/opt/zabbix-report/.venv/bin/python /opt/zabbix-report/zbx-report.py --config /opt/zabbix-report/config.ini
+# O retry interno trata falhas transitórias. Esta política cobre encerramentos inesperados.
+Restart=on-failure
+RestartSec=30s
+TimeoutStartSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
