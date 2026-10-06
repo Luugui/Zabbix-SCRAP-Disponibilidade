@@ -1,15 +1,14 @@
-"""ZBX Sender - a compact CustomTkinter interface for zabbix_sender."""
+"""ZBX Sender - a compact CustomTkinter interface using zabbix_utils."""
 
 from __future__ import annotations
 
 import threading
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import messagebox
 
 from zbx_sender_service import (
     APP_NAME,
@@ -17,13 +16,13 @@ from zbx_sender_service import (
     DEFAULT_TIMEOUT,
     HistoryStore,
     MetricRequest,
+    SENDER_LIBRARY_AVAILABLE,
     SendResult,
-    command_preview,
-    find_sender_executable,
     load_settings,
     parse_timestamp,
     save_settings,
     send_metric,
+    sender_preview,
     validate_request,
 )
 
@@ -58,7 +57,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "value_type": "Numérico",
     "timestamp": "",
     "timeout": str(DEFAULT_TIMEOUT),
-    "sender_path": "",
 }
 
 
@@ -80,10 +78,8 @@ class ZbxSenderApp(ctk.CTk):
 
         stored = load_settings()
         self.settings: dict[str, Any] = {**DEFAULT_SETTINGS, **stored}
+        self.settings.pop("sender_path", None)
         self.history_store = HistoryStore()
-        self.sender_path: Optional[str] = find_sender_executable(
-            self.settings.get("sender_path") or None
-        )
         self.current_view = "send"
         self.view_frame: Optional[ctk.CTkFrame] = None
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
@@ -179,21 +175,19 @@ class ZbxSenderApp(ctk.CTk):
         sender_hint.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             sender_hint,
-            text="EXECUTOR",
+            text="TRANSPORTE",
             text_color="#5e6d80",
             font=ctk.CTkFont(size=9, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, padx=13, pady=(12, 2), sticky="w")
-        self.sidebar_sender_label = ctk.CTkLabel(
+        ctk.CTkLabel(
             sender_hint,
-            text="Detectando…",
-            text_color=MUTED,
+            text=("Biblioteca oficial zabbix_utils" if SENDER_LIBRARY_AVAILABLE else "zabbix_utils não instalada"),
+            text_color=SUCCESS if SENDER_LIBRARY_AVAILABLE else WARNING,
             font=ctk.CTkFont(size=10),
             anchor="w",
             wraplength=180,
-        )
-        self.sidebar_sender_label.grid(row=1, column=0, padx=13, pady=(0, 12), sticky="w")
-        self._refresh_sender_labels()
+        ).grid(row=1, column=0, padx=13, pady=(0, 12), sticky="w")
 
         self.content_container = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.content_container.grid(row=0, column=1, padx=(0, 18), pady=(18, 0), sticky="nsew")
@@ -346,7 +340,7 @@ class ZbxSenderApp(ctk.CTk):
             pady=(0, 16),
             sticky="ew",
         )
-        trace_id = variable.trace_add("write", lambda *_args: self._update_command_preview())
+        trace_id = variable.trace_add("write", lambda *_args: self._update_sender_preview())
         self.form_trace_ids.append((variable, trace_id))
         return entry
 
@@ -359,12 +353,11 @@ class ZbxSenderApp(ctk.CTk):
         self.connection_dot.grid(row=0, column=0, padx=(12, 5), pady=7)
         self.connection_label = ctk.CTkLabel(
             badge,
-            text="Pronto",
-            text_color=SUCCESS,
+            text="Biblioteca pronta" if SENDER_LIBRARY_AVAILABLE else "Biblioteca ausente",
+            text_color=SUCCESS if SENDER_LIBRARY_AVAILABLE else WARNING,
             font=ctk.CTkFont(size=11, weight="bold"),
         )
         self.connection_label.grid(row=0, column=1, padx=(0, 12), pady=7)
-        self._refresh_sender_labels()
         return badge
 
     # ------------------------------------------------------------------
@@ -425,7 +418,7 @@ class ZbxSenderApp(ctk.CTk):
         )
         self.value_textbox.grid(row=2, column=0, padx=(20, 10), pady=(0, 14), sticky="ew")
         self.value_textbox.insert("1.0", str(self.settings.get("value", "1")))
-        self.value_textbox.bind("<KeyRelease>", lambda _event: self._update_command_preview())
+        self.value_textbox.bind("<KeyRelease>", lambda _event: self._update_sender_preview())
 
         ctk.CTkLabel(
             metric,
@@ -451,7 +444,7 @@ class ZbxSenderApp(ctk.CTk):
             text_color=TEXT,
             corner_radius=7,
             font=ctk.CTkFont(size=12),
-            command=lambda _value: self._update_command_preview(),
+            command=lambda _value: self._update_sender_preview(),
         )
         type_selector.grid(row=2, column=1, padx=(0, 20), pady=(0, 14), sticky="ew")
 
@@ -495,14 +488,14 @@ class ZbxSenderApp(ctk.CTk):
         top.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             top,
-            text="›  Comando equivalente",
+            text="›  Payload Sender",
             text_color=MUTED,
             font=ctk.CTkFont(size=11, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             top,
-            text="somente visualização",
+            text="via zabbix_utils",
             text_color="#5e6d80",
             font=ctk.CTkFont(size=10),
             anchor="e",
@@ -518,7 +511,7 @@ class ZbxSenderApp(ctk.CTk):
             anchor="w",
         )
         self.command_label.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="ew")
-        self._update_command_preview()
+        self._update_sender_preview()
 
         history_panel = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=12, border_width=1, border_color=BORDER)
         history_panel.grid(row=0, column=1, padx=(0, 0), sticky="nsew")
@@ -547,7 +540,7 @@ class ZbxSenderApp(ctk.CTk):
         self.recent_history_frame.grid_columnconfigure(0, weight=1)
         self._render_history_rows(self.recent_history_frame, limit=8, compact=True)
 
-    def _update_command_preview(self) -> None:
+    def _update_sender_preview(self) -> None:
         if self.command_label is None:
             return
         def get_var(key: str, fallback: str = "") -> str:
@@ -575,10 +568,7 @@ class ZbxSenderApp(ctk.CTk):
             timestamp=timestamp,
             timeout=DEFAULT_TIMEOUT,
         )
-        self.command_label.configure(text=command_preview(request, self._display_sender_name()))
-
-    def _display_sender_name(self) -> str:
-        return Path(self.sender_path).name if self.sender_path else "zabbix_sender"
+        self.command_label.configure(text=sender_preview(request))
 
     def _on_send(self) -> None:
         if self.send_button is not None and str(self.send_button.cget("state")) == "disabled":
@@ -592,10 +582,9 @@ class ZbxSenderApp(ctk.CTk):
 
         self._set_busy(True)
         self._set_status("Enviando métrica…", success=None)
-        configured_sender = str(self.settings.get("sender_path") or "").strip() or None
 
         def worker() -> None:
-            result = send_metric(request, configured_sender)
+            result = send_metric(request)
             self.after(0, lambda: self._finish_send(request, result))
 
         threading.Thread(target=worker, daemon=True, name="zbx-sender-worker").start()
@@ -822,41 +811,16 @@ class ZbxSenderApp(ctk.CTk):
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(2, weight=1)
 
-        executable_card = self._card(content, row=0, column=0, padx=0, pady=(0, 14), sticky="ew")
-        executable_card.grid_columnconfigure(0, weight=1)
-        self._section_title(executable_card, "▣", "Executor zabbix_sender")
+        library_card = self._card(content, row=0, column=0, padx=0, pady=(0, 14), sticky="ew")
+        library_card.grid_columnconfigure(0, weight=1)
+        self._section_title(library_card, "▣", "Transporte integrado")
         ctk.CTkLabel(
-            executable_card,
-            text="Use o executável instalado no PATH ou indique um arquivo local.",
+            library_card,
+            text="O envio é feito diretamente pelo protocolo Sender da biblioteca oficial zabbix_utils.",
             text_color=MUTED,
             font=ctk.CTkFont(size=11),
             anchor="w",
-        ).grid(row=1, column=0, padx=20, pady=(0, 6), sticky="w")
-        self.settings_sender_var = tk.StringVar(self, value=str(self.settings.get("sender_path", "")))
-        sender_entry = ctk.CTkEntry(
-            executable_card,
-            textvariable=self.settings_sender_var,
-            height=38,
-            fg_color=INPUT,
-            border_color=BORDER,
-            text_color=TEXT,
-            corner_radius=7,
-            font=ctk.CTkFont(size=12),
-        )
-        sender_entry.grid(row=2, column=0, padx=(20, 10), pady=(0, 18), sticky="ew")
-        ctk.CTkButton(
-            executable_card,
-            text="Procurar…",
-            width=105,
-            height=38,
-            corner_radius=7,
-            fg_color="#1b2a38",
-            hover_color="#25394b",
-            text_color=TEXT,
-            font=ctk.CTkFont(size=11),
-            command=self._browse_sender,
-        ).grid(row=2, column=1, padx=(0, 20), pady=(0, 18), sticky="e")
-        executable_card.grid_columnconfigure(1, weight=0)
+        ).grid(row=1, column=0, padx=20, pady=(0, 18), sticky="w")
 
         behavior_card = self._card(content, row=1, column=0, padx=0, pady=(0, 14), sticky="ew")
         behavior_card.grid_columnconfigure(0, weight=1)
@@ -885,9 +849,9 @@ class ZbxSenderApp(ctk.CTk):
         info_card.grid_columnconfigure(0, weight=1)
         self._section_title(info_card, "i", "Sobre o aplicativo")
         info = (
-            "O ZBX Sender é uma interface gráfica para o comando oficial zabbix_sender.\n\n"
-            "Cada envio abre uma conexão com o Zabbix Server, envia um único valor para o item trapper "
-            "e encerra o processo. O histórico fica salvo somente neste computador."
+            "O ZBX Sender usa a biblioteca oficial zabbix_utils, mantida pelo projeto Zabbix.\n\n"
+            "Cada envio abre uma conexão nativa com o Zabbix Server ou proxy, envia um único valor "
+            "para o item trapper e encerra a conexão. O histórico fica salvo somente neste computador."
         )
         ctk.CTkLabel(
             info_card,
@@ -912,14 +876,6 @@ class ZbxSenderApp(ctk.CTk):
             command=self._save_settings_from_view,
         ).grid(row=3, column=0, padx=0, pady=(0, 20), sticky="w")
 
-    def _browse_sender(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Selecione o executável zabbix_sender",
-            filetypes=[("Executável", "*.exe"), ("Todos os arquivos", "*.*")],
-        )
-        if selected:
-            self.settings_sender_var.set(selected)
-
     def _save_settings_from_view(self) -> None:
         raw_timeout = self.settings_timeout_var.get().strip()
         try:
@@ -930,38 +886,13 @@ class ZbxSenderApp(ctk.CTk):
         if not 1 <= timeout <= 120:
             self._set_status("O timeout precisa estar entre 1 e 120 segundos.", success=False)
             return
-        self.settings["sender_path"] = self.settings_sender_var.get().strip()
         self.settings["timeout"] = str(timeout)
         save_settings(self.settings)
-        self.sender_path = find_sender_executable(self.settings.get("sender_path") or None)
-        self._refresh_sender_labels()
         self._set_status("Configurações salvas", success=True)
 
     # ------------------------------------------------------------------
     # Persistence and status
     # ------------------------------------------------------------------
-    def _refresh_sender_labels(self) -> None:
-        self.sender_path = find_sender_executable(self.settings.get("sender_path") or None)
-        if hasattr(self, "sidebar_sender_label"):
-            if self.sender_path:
-                self.sidebar_sender_label.configure(
-                    text=Path(self.sender_path).name, text_color=SUCCESS
-                )
-            else:
-                self.sidebar_sender_label.configure(
-                    text="Não encontrado no PATH", text_color=WARNING
-                )
-        if (
-            getattr(self, "connection_label", None) is not None
-            and self.connection_label.winfo_exists()
-        ):
-            if self.sender_path:
-                self.connection_label.configure(text="Pronto", text_color=SUCCESS)
-                self.connection_dot.configure(text_color=SUCCESS)
-            else:
-                self.connection_label.configure(text="Atenção", text_color=WARNING)
-                self.connection_dot.configure(text_color=WARNING)
-
     def _set_status(self, message: str, success: Optional[bool]) -> None:
         if self.status_text is not None:
             self.status_text.configure(text=message, text_color=SUCCESS if success is True else DANGER if success is False else MUTED)

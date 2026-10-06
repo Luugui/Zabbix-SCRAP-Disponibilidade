@@ -6,12 +6,10 @@ from zbx_sender_service import (
     HistoryStore,
     MetricRequest,
     SendResult,
-    build_command,
-    build_timestamp_payload,
-    command_preview,
     normalize_numeric,
     parse_timestamp,
     send_metric,
+    sender_preview,
     validate_request,
 )
 
@@ -29,35 +27,6 @@ def valid_request(**overrides):
     }
     data.update(overrides)
     return MetricRequest(**data)
-
-
-def test_build_command_without_timestamp_is_shell_free():
-    request = valid_request(value="1,50")
-    assert build_command(request) == [
-        "zabbix_sender",
-        "-z",
-        "zabbix.local",
-        "-p",
-        "10051",
-        "-s",
-        "api-prod-01",
-        "-k",
-        "api.health",
-        "-o",
-        "1.5",
-    ]
-
-
-def test_timestamp_payload_uses_zabbix_sender_input_format():
-    request = valid_request(value="ok", value_type="text", timestamp=1735689600)
-    assert build_timestamp_payload(request) == '"api-prod-01" api.health 1735689600 "ok"\n'
-
-
-def test_timestamp_command_requires_input_path():
-    request = valid_request(timestamp=1735689600)
-    with pytest.raises(ValueError):
-        build_command(request)
-    assert build_command(request, input_file="payload.txt")[-2:] == ["-i", "payload.txt"]
 
 
 def test_normalize_numeric_accepts_brazilian_decimal_separator():
@@ -81,16 +50,93 @@ def test_invalid_timestamp_is_rejected():
         parse_timestamp("ontem")
 
 
-def test_command_preview_is_readable():
-    preview = command_preview(valid_request())
-    assert preview.startswith("zabbix_sender -z zabbix.local -p 10051")
-    assert "-k api.health -o 1" in preview
+def test_sender_preview_describes_native_library_call():
+    preview = sender_preview(valid_request())
+    assert preview.startswith("Sender(server='zabbix.local', port=10051)")
+    assert ".send_value('api-prod-01', 'api.health', '1')" in preview
+
+
+def test_sender_preview_survives_invalid_numeric_input_during_typing():
+    preview = sender_preview(valid_request(value="-"))
+    assert "send_value('api-prod-01', 'api.health', '-')" in preview
+
+
+class FakeResponse:
+    processed = 1
+    failed = 0
+    total = 1
+    time = 0.001
+
+
+class FakeSender:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.calls = []
+        self.__class__.instances.append(self)
+
+    def send_value(self, host, key, value, clock=None):
+        self.calls.append((host, key, value, clock))
+        return FakeResponse()
+
+
+def test_send_metric_uses_official_sender_factory_without_external_process():
+    FakeSender.instances.clear()
+    request = valid_request(value="1,50", timestamp=1735689600)
+
+    result = send_metric(request, sender_factory=FakeSender)
+
+    assert result.success is True
+    assert result.message == "Enviado com sucesso"
+    assert "processados: 1" in result.output
+    assert len(FakeSender.instances) == 1
+    instance = FakeSender.instances[0]
+    assert instance.kwargs == {
+        "server": "zabbix.local",
+        "port": 10051,
+        "timeout": 10,
+    }
+    assert instance.calls == [("api-prod-01", "api.health", "1.5", 1735689600)]
+
+
+def test_send_metric_reports_failed_trapper_response():
+    class FailedResponse:
+        processed = 0
+        failed = 1
+        total = 1
+        time = 0.002
+
+    class FailedSender(FakeSender):
+        def send_value(self, host, key, value, clock=None):
+            return FailedResponse()
+
+    result = send_metric(valid_request(), sender_factory=FailedSender)
+
+    assert result.success is False
+    assert result.returncode == 1
+    assert "falhos: 1" in result.output
+
+
+def test_send_metric_maps_library_exception_to_user_result():
+    class BrokenSender:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_value(self, *_args):
+            raise OSError("connection refused")
+
+    result = send_metric(valid_request(), sender_factory=BrokenSender)
+
+    assert result.success is False
+    assert result.message == "Não foi possível enviar a métrica ao Zabbix."
+    assert "connection refused" in result.output
 
 
 def test_history_store_recovers_and_limits_records(tmp_path: Path):
     store = HistoryStore(tmp_path / "history.json")
     request = valid_request()
-    result = SendResult(True, "Enviado com sucesso", "sent: 1; skipped: 0; total: 1")
+    result = SendResult(True, "Enviado com sucesso", "processados: 1; falhos: 0; total: 1")
 
     for _ in range(35):
         store.append(request, result)
@@ -100,18 +146,3 @@ def test_history_store_recovers_and_limits_records(tmp_path: Path):
     assert entries[0]["success"] is True
     store.clear()
     assert store.load() == []
-
-
-def test_send_metric_executes_sender_without_shell(tmp_path: Path):
-    fake_sender = tmp_path / "zabbix_sender"
-    fake_sender.write_text(
-        "#!/bin/sh\nprintf 'sent: 1; skipped: 0; total: 1\\n'\n",
-        encoding="utf-8",
-    )
-    fake_sender.chmod(0o755)
-
-    result = send_metric(valid_request(), str(fake_sender))
-
-    assert result.success is True
-    assert result.message == "Enviado com sucesso"
-    assert "sent: 1" in result.output

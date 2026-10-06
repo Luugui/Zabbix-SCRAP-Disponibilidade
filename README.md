@@ -95,8 +95,8 @@ Será salvo na mesma pasta do script, com uma aba para cada pagina definida no c
 ## 🖥️ ZBX Sender — aplicativo desktop
 
 O repositório também inclui um pequeno aplicativo em **Python + CustomTkinter**
-para enviar um único valor a um item **trapper** do Zabbix usando o comando
-oficial `zabbix_sender`.
+para enviar um único valor a um item **trapper** do Zabbix usando a biblioteca
+oficial `zabbix_utils`.
 
 ### Funcionalidades
 
@@ -106,9 +106,9 @@ oficial `zabbix_sender`.
 - Timestamp opcional no formato `AAAA-MM-DD HH:MM:SS` ou epoch.
 - Atalho `Ctrl + Enter` para envio rápido.
 - Histórico local dos envios em JSON.
-- Prévia do comando equivalente ao `zabbix_sender`.
-- Configuração do caminho do executável e timeout.
-- Execução sem shell, evitando problemas de quoting em valores especiais.
+- Prévia da chamada nativa `Sender.send_value`.
+- Timeout configurável diretamente na biblioteca oficial.
+- Comunicação direta com o protocolo Sender, sem `zabbix_sender` externo.
 
 ### Como executar em modo desenvolvimento
 
@@ -117,9 +117,11 @@ python -m pip install -r requirements-sender.txt
 python zbx_sender_app.py
 ```
 
-O `zabbix_sender` precisa estar no `PATH` ou ser selecionado em
-**Configurações → Executor zabbix_sender**. No Windows, selecione o arquivo
-`zabbix_sender.exe` distribuído com a instalação do Zabbix.
+O pacote `zabbix_utils` é instalado automaticamente e implementa o protocolo
+Sender diretamente em Python. A biblioteca oficial é compatível com Zabbix 6.0+
+e Python 3.8+. Consulte a [documentação oficial do Sender em Python](https://www.zabbix.com/documentation/7.4/en/devel/python/sender)
+e o [repositório oficial da biblioteca](https://github.com/zabbix/python-zabbix-utils)
+para detalhes da API.
 
 ### Como gerar o executável
 
@@ -135,7 +137,13 @@ Windows PowerShell:
 .\build_windows.ps1
 ```
 
-O artefato será criado na pasta `dist/`. O executável do Zabbix Sender não é
-embutido automaticamente: ele pode ser instalado no `PATH` ou apontado pela
-tela de configurações do aplicativo.
+O artefato será criado na pasta `dist/`. O binário do aplicativo já inclui o
+CustomTkinter e o `zabbix_utils`; nenhum executável externo do Zabbix é
+necessário no computador de destino.
 
+### Observação sobre TLS
+
+O `zabbix_utils` oficial não oferece TLS pronto no `Sender`. Para ambientes que
+exigem criptografia PSK ou certificado, é necessário fornecer um `socket_wrapper`
+com uma biblioteca TLS compatível. Essa opção ainda não está exposta na tela
+do aplicativo.

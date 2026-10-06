@@ -12,6 +12,7 @@ $python = ".venv\Scripts\python.exe"
   --onefile `
   --windowed `
   --collect-all customtkinter `
+  --collect-all zabbix_utils `
   --name zbx-sender `
   zbx_sender_app.py
 

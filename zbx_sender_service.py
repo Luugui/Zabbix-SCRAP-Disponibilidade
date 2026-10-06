@@ -1,29 +1,32 @@
 """Core services for the ZBX Sender desktop application.
 
-The GUI deliberately delegates transport to the official ``zabbix_sender``
-command. This keeps the application small, compatible with existing Zabbix
-installations, and faithful to the sender's command-line behavior.
+Transport is implemented by the official ``zabbix_utils`` package. The GUI
+therefore speaks the Zabbix Sender protocol directly and does not require the
+external ``zabbix_sender`` executable.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
-import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional
+
+try:
+    from zabbix_utils import Sender
+except ImportError:  # pragma: no cover - exercised when dependencies are absent.
+    Sender = None  # type: ignore[assignment,misc]
 
 
 APP_NAME = "ZBX Sender"
 DEFAULT_PORT = 10051
 DEFAULT_TIMEOUT = 10
 MAX_HISTORY_ITEMS = 30
+SENDER_LIBRARY_AVAILABLE = Sender is not None
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ class MetricRequest:
 
 @dataclass(frozen=True)
 class SendResult:
-    """Outcome returned by the sender process."""
+    """Outcome returned by the integrated Sender library."""
 
     success: bool
     message: str
@@ -63,34 +66,8 @@ def app_data_dir() -> Path:
     return base / "zbx-sender"
 
 
-def find_sender_executable(configured_path: Optional[str] = None) -> Optional[str]:
-    """Find an existing zabbix_sender executable.
-
-    The lookup order is: explicit configured path, a bundled ``bin`` folder
-    next to the application, then the operating system PATH.
-    """
-
-    candidates: list[Path] = []
-    if configured_path:
-        candidates.append(Path(configured_path).expanduser())
-
-    application_dir = Path(__file__).resolve().parent
-    names = ("zabbix_sender.exe", "zabbix_sender") if os.name == "nt" else ("zabbix_sender",)
-    for name in names:
-        candidates.append(application_dir / "bin" / name)
-
-    path_candidate = shutil.which("zabbix_sender")
-    if path_candidate:
-        candidates.append(Path(path_candidate))
-
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate.resolve())
-    return None
-
-
 def normalize_numeric(value: str) -> str:
-    """Normalize Brazilian decimal commas to the dot format accepted by Zabbix."""
+    """Normalize Brazilian decimal commas to the format accepted by Zabbix."""
 
     candidate = value.strip().replace(",", ".")
     try:
@@ -167,167 +144,97 @@ def validate_request(request: MetricRequest) -> list[str]:
     return errors
 
 
-def _quote_payload_field(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\r", "\\r")
-        .replace("\n", "\\n")
-    )
-    return f'"{escaped}"'
+def sender_preview(request: MetricRequest) -> str:
+    """Return a readable preview of the native zabbix_utils call."""
 
-
-def build_timestamp_payload(request: MetricRequest) -> str:
-    """Build the input-file line consumed by zabbix_sender ``-T -i``."""
-
-    if request.timestamp is None:
-        raise ValueError("Timestamp obrigatório para payload com timestamp.")
-    value = request.value if request.value_type != "numeric" else normalize_numeric(request.value)
+    if request.value_type == "numeric":
+        try:
+            value = normalize_numeric(request.value or "0")
+        except ValueError:
+            value = request.value or "<valor>"
+    else:
+        value = request.value
+    value_literal = repr(value)
+    timestamp = f", {request.timestamp}" if request.timestamp is not None else ""
     return (
-        f"{_quote_payload_field(request.host)} {request.key} "
-        f"{request.timestamp} {_quote_payload_field(value)}\n"
+        f"Sender(server={request.server or '<servidor>'!r}, port={request.port or DEFAULT_PORT})"
+        f".send_value({request.host or '<host>'!r}, {request.key or '<chave>'!r}, "
+        f"{value_literal}{timestamp})"
     )
 
 
-def build_command(
-    request: MetricRequest,
-    executable: str = "zabbix_sender",
-    input_file: Optional[str] = None,
-) -> list[str]:
-    """Build a shell-free argv list for the official sender."""
+def _response_summary(response: Any) -> str:
+    """Format the official TrapperResponse for the history and UI."""
 
-    if request.timestamp is not None:
-        if not input_file:
-            raise ValueError("É necessário um arquivo de entrada para timestamp.")
-        return [
-            executable,
-            "-z",
-            request.server,
-            "-p",
-            str(request.port),
-            "-T",
-            "-i",
-            input_file,
-        ]
-
-    value = request.value if request.value_type != "numeric" else normalize_numeric(request.value)
-    return [
-        executable,
-        "-z",
-        request.server,
-        "-p",
-        str(request.port),
-        "-s",
-        request.host,
-        "-k",
-        request.key,
-        "-o",
-        value,
-    ]
-
-
-def command_preview(request: MetricRequest, executable: str = "zabbix_sender") -> str:
-    """Return a compact human-readable equivalent command for the UI."""
-
-    try:
-        if request.timestamp is not None:
-            args = build_command(request, executable, "<payload temporário>")
-        else:
-            args = build_command(request, executable)
-    except (ValueError, TypeError):
-        args = [
-            executable,
-            "-z",
-            request.server or "<servidor>",
-            "-p",
-            str(request.port or DEFAULT_PORT),
-            "-s",
-            request.host or "<host>",
-            "-k",
-            request.key or "<chave>",
-            "-o",
-            request.value or "<valor>",
-        ]
-
-    rendered: list[str] = []
-    for arg in args:
-        if " " in arg or "<" in arg or ">" in arg:
-            rendered.append(f'"{arg}"')
-        else:
-            rendered.append(arg)
-    return " ".join(rendered)
-
-
-def _combine_process_output(stdout: str, stderr: str) -> str:
-    parts = [part.strip() for part in (stdout, stderr) if part and part.strip()]
-    return "\n".join(parts)
+    return (
+        f"processados: {response.processed}; "
+        f"falhos: {response.failed}; "
+        f"total: {response.total}; "
+        f"tempo: {response.time}s"
+    )
 
 
 def send_metric(
     request: MetricRequest,
-    executable: Optional[str] = None,
+    sender_factory: Optional[Callable[..., Any]] = None,
 ) -> SendResult:
-    """Send one metric through zabbix_sender without invoking a shell."""
+    """Send one metric directly through the official ``zabbix_utils`` Sender.
+
+    ``sender_factory`` is intentionally optional and exists to make the
+    transport easy to test without opening a network connection. Production
+    callers use the official ``Sender`` class automatically.
+    """
 
     errors = validate_request(request)
     if errors:
         return SendResult(False, errors[0], returncode=2)
-
-    sender = find_sender_executable(executable)
-    if not sender:
+    if Sender is None and sender_factory is None:
         return SendResult(
             False,
-            "zabbix_sender não encontrado. Instale-o ou indique o caminho em Configurações.",
+            "A biblioteca oficial zabbix_utils não está instalada.",
             returncode=127,
         )
 
-    temporary_path: Optional[str] = None
+    sender_class = sender_factory or Sender
+    value = request.value if request.value_type != "numeric" else normalize_numeric(request.value)
+    started = time.perf_counter()
     try:
-        if request.timestamp is not None:
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", suffix=".txt", delete=False
-            ) as payload_file:
-                payload_file.write(build_timestamp_payload(request))
-                temporary_path = payload_file.name
-            command = build_command(request, sender, temporary_path)
-        else:
-            command = build_command(request, sender)
-
-        started = time.perf_counter()
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        sender = sender_class(
+            server=request.server,
+            port=request.port,
             timeout=request.timeout,
-            check=False,
+        )
+        response = sender.send_value(
+            request.host,
+            request.key,
+            value,
+            request.timestamp,
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
-        output = _combine_process_output(completed.stdout, completed.stderr)
-        if completed.returncode == 0:
+        output = _response_summary(response)
+        if response.failed == 0 and response.processed >= 1:
             return SendResult(True, "Enviado com sucesso", output, 0, duration_ms)
         return SendResult(
             False,
-            "O Zabbix recusou o envio. Verifique o servidor, host e chave do item.",
+            "O Zabbix recusou o envio. Verifique o host e a chave do item.",
             output,
-            completed.returncode,
+            1,
             duration_ms,
         )
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         return SendResult(
             False,
             f"Tempo limite excedido após {request.timeout} segundos.",
             returncode=124,
         )
-    except OSError as exc:
-        return SendResult(False, f"Não foi possível executar o zabbix_sender: {exc}", returncode=126)
-    finally:
-        if temporary_path:
-            try:
-                Path(temporary_path).unlink(missing_ok=True)
-            except OSError:
-                pass
+    except Exception as exc:  # zabbix_utils maps socket/protocol errors to several types.
+        return SendResult(
+            False,
+            "Não foi possível enviar a métrica ao Zabbix.",
+            str(exc) or exc.__class__.__name__,
+            1,
+            int((time.perf_counter() - started) * 1000),
+        )
 
 
 class HistoryStore:
@@ -345,19 +252,7 @@ class HistoryStore:
 
     def append(self, request: MetricRequest, result: SendResult) -> list[dict[str, Any]]:
         entries = self.load()
-        entries.insert(
-            0,
-            {
-                "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "host": request.host,
-                "key": request.key,
-                "value": request.value,
-                "success": result.success,
-                "message": result.message,
-                "output": result.output,
-                "duration_ms": result.duration_ms,
-            },
-        )
+        entries.insert(0, history_record(request, result))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(entries[:MAX_HISTORY_ITEMS], ensure_ascii=False, indent=2),
@@ -412,15 +307,12 @@ __all__ = [
     "MetricRequest",
     "SendResult",
     "app_data_dir",
-    "build_command",
-    "build_timestamp_payload",
-    "command_preview",
-    "find_sender_executable",
     "history_record",
     "load_settings",
     "normalize_numeric",
     "parse_timestamp",
     "save_settings",
     "send_metric",
+    "sender_preview",
     "validate_request",
 ]
