@@ -90,4 +90,52 @@ Será salvo na mesma pasta do script, com uma aba para cada pagina definida no c
 - A paginação do Zabbix é percorrida automaticamente até o fim.
 - Nomes de abas do Excel são limitados a 31 caracteres.
 
+---
+
+## 🖥️ ZBX Sender — aplicativo desktop
+
+O repositório também inclui um pequeno aplicativo em **Python + CustomTkinter**
+para enviar um único valor a um item **trapper** do Zabbix usando o comando
+oficial `zabbix_sender`.
+
+### Funcionalidades
+
+- Interface escura, moderna e minimalista.
+- Campos para servidor, porta, host, chave do item e valor.
+- Tipos de valor numérico ou texto, com suporte a decimal usando vírgula.
+- Timestamp opcional no formato `AAAA-MM-DD HH:MM:SS` ou epoch.
+- Atalho `Ctrl + Enter` para envio rápido.
+- Histórico local dos envios em JSON.
+- Prévia do comando equivalente ao `zabbix_sender`.
+- Configuração do caminho do executável e timeout.
+- Execução sem shell, evitando problemas de quoting em valores especiais.
+
+### Como executar em modo desenvolvimento
+
+```bash
+python -m pip install -r requirements-sender.txt
+python zbx_sender_app.py
+```
+
+O `zabbix_sender` precisa estar no `PATH` ou ser selecionado em
+**Configurações → Executor zabbix_sender**. No Windows, selecione o arquivo
+`zabbix_sender.exe` distribuído com a instalação do Zabbix.
+
+### Como gerar o executável
+
+Linux:
+
+```bash
+./build_linux.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\build_windows.ps1
+```
+
+O artefato será criado na pasta `dist/`. O executável do Zabbix Sender não é
+embutido automaticamente: ele pode ser instalado no `PATH` ou apontado pela
+tela de configurações do aplicativo.
 
